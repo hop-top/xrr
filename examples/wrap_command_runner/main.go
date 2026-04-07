@@ -83,14 +83,17 @@ func (w *Wrapper) Run(ctx context.Context, name string, args ...string) (string,
 
 // RunInDir records or replays a `name args...` invocation in a working dir.
 //
-// Caveat: the current exec adapter fingerprint hashes only argv+stdin,
-// so identical commands run in different dirs WILL collide on the same
-// cassette. If your tests need per-directory isolation, either extend
-// the adapter's fingerprinting inputs or namespace the cassette dir
-// per test case. The dir is still honoured by inner.RunInDir during
-// record mode — only the replay key is dir-agnostic.
+// dir is threaded into xexec.Request.Cwd so the fingerprint includes the
+// working directory. Two identical commands run in two different dirs
+// produce distinct cassette keys — essential for cross-process e2e
+// adopters (XRR_CASSETTE_DIR pattern) where one parent cassette dir
+// captures many subprocess invocations from different temp directories
+// within a single test run.
 func (w *Wrapper) RunInDir(ctx context.Context, dir, name string, args ...string) (string, error) {
-	req := &xexec.Request{Argv: append([]string{name}, args...)}
+	req := &xexec.Request{
+		Argv: append([]string{name}, args...),
+		Cwd:  dir,
+	}
 	resp, err := w.sess.Record(ctx, w.adapter, req, func() (xrr.Response, error) {
 		out, runErr := w.inner.RunInDir(ctx, dir, name, args...)
 		return &xexec.Response{Stdout: out, ExitCode: xexec.ExitCodeFromError(runErr)}, runErr
