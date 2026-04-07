@@ -12,6 +12,15 @@
 // Used in the wild by hop.top/git's internal/xrrx and tlc's
 // internal/flowtest. Adopt this shape any time you have a subprocess-
 // running interface you want to make deterministic in tests.
+//
+// Topology matters: xrr intercepts at a wrapper seam INSIDE the process
+// that makes the calls. For in-process unit/integration tests this file
+// is the canonical shape. For subprocess/e2e tests where your parent
+// test shells out to a compiled binary and asserts on its side effects,
+// the BINARY must also adopt this pattern — call xrr.SessionFromEnv()
+// at startup and wire the returned session into its runners. The
+// parent test then sets XRR_MODE + XRR_CASSETTE_DIR in the child's
+// environment. See the "Cross-process e2e" section in README.md.
 package main
 
 import (
