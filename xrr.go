@@ -36,9 +36,18 @@ type Response interface {
 }
 
 // Cassette reads/writes interaction files.
+//
+// Save persists a recorded interaction. recordedErr is the error returned by
+// the original do() (or nil); when non-nil it is serialized as the envelope
+// error field on the resp file so replay can re-emit a matching error.
+//
+// Load returns recordedErr as a string from the resp envelope's optional
+// error field. Empty string ⇒ success; non-empty ⇒ replay should surface
+// errors.New(recordedErr) alongside respTarget. ErrCassetteMiss is returned
+// if no matching files exist.
 type Cassette interface {
-	Load(adapterID, fingerprint string, reqTarget, respTarget any) error
-	Save(adapterID, fingerprint string, req, resp any) error
+	Load(adapterID, fingerprint string, reqTarget, respTarget any) (recordedErr string, err error)
+	Save(adapterID, fingerprint string, req, resp any, recordedErr error) error
 }
 
 // Session owns the lifecycle of one record/replay run.

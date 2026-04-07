@@ -67,17 +67,16 @@ func NewWrapper(inner Real, sess *xrr.FileSession) *Wrapper {
 
 // Run records or replays a `name args...` invocation.
 //
-// Process exit failures (`*os/exec.ExitError`) are absorbed into the
-// Response (via ExitCodeFromError) and returned as a nil error from the
-// inner do(). This is necessary because FileSession.record currently
-// short-circuits on do() error and would otherwise skip writing the
-// cassette — leaving non-zero exits un-replayable. Real I/O failures
-// (start failure, ctx cancel, etc.) still bubble up as -1 + non-nil err.
+// The natural shape works now that FileSession.record persists do()
+// errors into the cassette envelope: just return whatever the inner
+// runner returned. ExitCode is populated via ExitCodeFromError so the
+// recorded payload still carries the real exit status; the error itself
+// flows through xrr untouched and is re-emitted on replay.
 func (w *Wrapper) Run(ctx context.Context, name string, args ...string) (string, error) {
 	req := &xexec.Request{Argv: append([]string{name}, args...)}
 	resp, err := w.sess.Record(ctx, w.adapter, req, func() (xrr.Response, error) {
 		out, runErr := w.inner.Run(ctx, name, args...)
-		return wrapExecResult(out, runErr)
+		return &xexec.Response{Stdout: out, ExitCode: xexec.ExitCodeFromError(runErr)}, runErr
 	})
 	return stdoutOf(resp), err
 }
@@ -94,23 +93,9 @@ func (w *Wrapper) RunInDir(ctx context.Context, dir, name string, args ...string
 	req := &xexec.Request{Argv: append([]string{name}, args...)}
 	resp, err := w.sess.Record(ctx, w.adapter, req, func() (xrr.Response, error) {
 		out, runErr := w.inner.RunInDir(ctx, dir, name, args...)
-		return wrapExecResult(out, runErr)
+		return &xexec.Response{Stdout: out, ExitCode: xexec.ExitCodeFromError(runErr)}, runErr
 	})
 	return stdoutOf(resp), err
-}
-
-// wrapExecResult absorbs `*os/exec.ExitError` into the Response so the
-// session records a cassette for non-zero exits. Non-exit errors (start
-// failure, context cancel, etc.) propagate as -1 + non-nil error.
-func wrapExecResult(out string, runErr error) (xrr.Response, error) {
-	code := xexec.ExitCodeFromError(runErr)
-	resp := &xexec.Response{Stdout: out, ExitCode: code}
-	if code >= 0 {
-		// Either success or a clean process exit — recordable, no error.
-		return resp, nil
-	}
-	// -1: not a process exit (e.g. binary missing). Surface to caller.
-	return resp, runErr
 }
 
 // stdoutOf normalises the response: in record mode it's *xexec.Response;
@@ -215,13 +200,10 @@ func main() {
 		fmt.Printf("record git branch: %s\n", branch)
 	}
 
-	// Docker domain wrapper. If `docker` is not on PATH the call returns
-	// a non-nil error (start failure → ExitCodeFromError = -1) and
-	// wrapExecResult propagates the error WITHOUT recording a cassette.
-	// If dockerd is unreachable but the binary exists, docker exits
-	// non-zero — wrapExecResult absorbs that into the Response and a
-	// cassette IS written. The asymmetry is intentional and reflects the
-	// current FileSession.record contract.
+	// Docker domain wrapper. Both failure modes record cleanly now:
+	// missing binary (start failure, ExitCodeFromError = -1) and
+	// non-zero docker exit are persisted to the cassette and re-emitted
+	// on replay with the same error string.
 	docker := NewDockerRunner(w)
 	ver, err := docker.Version(ctx)
 	if err != nil {

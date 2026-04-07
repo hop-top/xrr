@@ -489,3 +489,127 @@ func TestE2EGRPC_BinaryPayload(t *testing.T) {
 	assert.EqualValues(t, 0, payload["status_code"])
 
 }
+
+// ── error round-trip per adapter ─────────────────────────────────────────────
+//
+// All five adapters share the same record/replay-with-error contract:
+// when do() returns a non-nil error, record persists it in the envelope and
+// returns it; replay re-emits errors.New(recordedErr) alongside RawResponse.
+
+// TestE2EExec_ErrorRoundTrip — non-zero exec exit recorded + replayed.
+func TestE2EExec_ErrorRoundTrip(t *testing.T) {
+	adapter := xexec.NewAdapter()
+	req := &xexec.Request{Argv: []string{"false"}}
+	wantResp := &xexec.Response{Stdout: "", ExitCode: 1}
+	wantErr := errors.New("exit status 1")
+
+	recSess, dir := newSession(t, xrr.ModeRecord)
+	resp, err := recSess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		return wantResp, wantErr
+	})
+	require.Error(t, err)
+	assert.Equal(t, "exit status 1", err.Error())
+	assert.Equal(t, 1, resp.(*xexec.Response).ExitCode)
+
+	replaySess := replaySession(t, dir)
+	raw, err := replaySess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		t.Fatal("do() must not run in replay")
+		return nil, nil
+	})
+	require.Error(t, err)
+	assert.Equal(t, "exit status 1", err.Error())
+	require.NotNil(t, raw)
+	payload := raw.(*xrr.RawResponse).Payload
+	assert.EqualValues(t, 1, payload["exit_code"])
+}
+
+// TestE2EHTTP_ErrorRoundTrip — connection / transport-level error recorded.
+func TestE2EHTTP_ErrorRoundTrip(t *testing.T) {
+	adapter := xhttp.NewAdapter()
+	req := &xhttp.Request{Method: "GET", URL: "https://unreachable.example/api"}
+	wantResp := &xhttp.Response{Status: 0, Body: ""}
+	wantErr := errors.New("dial tcp: connection refused")
+
+	recSess, dir := newSession(t, xrr.ModeRecord)
+	_, err := recSess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		return wantResp, wantErr
+	})
+	require.Error(t, err)
+	assert.Equal(t, "dial tcp: connection refused", err.Error())
+
+	replaySess := replaySession(t, dir)
+	_, err = replaySess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		t.Fatal("do() must not run in replay")
+		return nil, nil
+	})
+	require.Error(t, err)
+	assert.Equal(t, "dial tcp: connection refused", err.Error())
+}
+
+// TestE2ERedis_ErrorRoundTrip — Redis WRONGTYPE-style failure recorded.
+func TestE2ERedis_ErrorRoundTrip(t *testing.T) {
+	adapter := xredis.NewAdapter()
+	req := &xredis.Request{Command: "INCR", Args: []string{"not-a-number"}}
+	wantResp := &xredis.Response{Result: nil}
+	wantErr := errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
+
+	recSess, dir := newSession(t, xrr.ModeRecord)
+	_, err := recSess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		return wantResp, wantErr
+	})
+	require.Error(t, err)
+
+	replaySess := replaySession(t, dir)
+	_, err = replaySess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		t.Fatal("do() must not run in replay")
+		return nil, nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WRONGTYPE")
+}
+
+// TestE2ESQL_ErrorRoundTrip — SQL constraint violation recorded.
+func TestE2ESQL_ErrorRoundTrip(t *testing.T) {
+	adapter := xsql.NewAdapter()
+	req := &xsql.Request{Query: "INSERT INTO users(id, name) VALUES (?, ?)", Args: []any{1, "alice"}}
+	wantResp := &xsql.Response{Rows: nil, Affected: 0}
+	wantErr := errors.New("UNIQUE constraint failed: users.id")
+
+	recSess, dir := newSession(t, xrr.ModeRecord)
+	_, err := recSess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		return wantResp, wantErr
+	})
+	require.Error(t, err)
+
+	replaySess := replaySession(t, dir)
+	_, err = replaySess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		t.Fatal("do() must not run in replay")
+		return nil, nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNIQUE constraint failed")
+}
+
+// TestE2EGRPC_ErrorRoundTrip — gRPC non-OK status recorded.
+func TestE2EGRPC_ErrorRoundTrip(t *testing.T) {
+	adapter := xgrpc.NewAdapter()
+	req := &xgrpc.Request{Service: "user.UserService", Method: "GetUser", Message: []byte(`{"id":404}`)}
+	wantResp := &xgrpc.Response{StatusCode: 5, Message: nil} // 5 = NotFound
+	wantErr := errors.New("rpc error: code = NotFound desc = user not found")
+
+	recSess, dir := newSession(t, xrr.ModeRecord)
+	_, err := recSess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		return wantResp, wantErr
+	})
+	require.Error(t, err)
+
+	replaySess := replaySession(t, dir)
+	raw, err := replaySess.Record(context.Background(), adapter, req, func() (xrr.Response, error) {
+		t.Fatal("do() must not run in replay")
+		return nil, nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "NotFound")
+	require.NotNil(t, raw)
+	assert.EqualValues(t, 5, raw.(*xrr.RawResponse).Payload["status_code"])
+}

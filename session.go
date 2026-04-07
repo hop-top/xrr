@@ -2,6 +2,7 @@ package xrr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -26,8 +27,16 @@ func (r *RawResponse) AdapterID() string { return r.adapterID_ }
 
 // Record executes one interaction according to the session mode.
 //
-//   - record:      calls do(), saves req+resp to cassette, returns resp.
-//   - replay:      loads from cassette, returns RawResponse; do() NOT called.
+//   - record:      calls do(), saves req+resp+err to cassette, returns
+//                  (resp, err) verbatim. A non-nil err from do() is
+//                  persisted as the resp envelope's "error" field and is
+//                  also returned to the caller, so error semantics are
+//                  preserved across record sessions. Save failures take
+//                  precedence over the recorded error.
+//   - replay:      loads from cassette, returns (RawResponse, replayedErr)
+//                  where replayedErr is errors.New(envelope.error) when
+//                  the recording captured a failure, else nil. do() is
+//                  NOT called.
 //   - passthrough: calls do(), never touches cassette.
 func (s *FileSession) Record(
 	_ context.Context,
@@ -51,18 +60,20 @@ func (s *FileSession) Record(
 func (s *FileSession) Close() error { return nil }
 
 func (s *FileSession) record(adapter Adapter, req Request, do func() (Response, error)) (Response, error) {
-	resp, err := do()
-	if err != nil {
-		return nil, err
+	resp, doErr := do()
+
+	// Even when do() failed, we still want to persist the interaction so
+	// replay can re-emit the same error shape. Skip persistence only if
+	// the adapter cannot fingerprint the request — in that case there is
+	// no place to file the cassette.
+	fp, fpErr := adapter.Fingerprint(req)
+	if fpErr != nil {
+		return nil, fmt.Errorf("xrr: fingerprint: %w", fpErr)
 	}
-	fp, err := adapter.Fingerprint(req)
-	if err != nil {
-		return nil, fmt.Errorf("xrr: fingerprint: %w", err)
+	if saveErr := s.cassette.Save(adapter.ID(), fp, req, resp, doErr); saveErr != nil {
+		return nil, fmt.Errorf("xrr: save: %w", saveErr)
 	}
-	if err := s.cassette.Save(adapter.ID(), fp, req, resp); err != nil {
-		return nil, fmt.Errorf("xrr: save: %w", err)
-	}
-	return resp, nil
+	return resp, doErr
 }
 
 func (s *FileSession) replay(adapter Adapter, req Request) (Response, error) {
@@ -71,8 +82,13 @@ func (s *FileSession) replay(adapter Adapter, req Request) (Response, error) {
 		return nil, fmt.Errorf("xrr: fingerprint: %w", err)
 	}
 	var reqPayload, respPayload map[string]any
-	if err := s.cassette.Load(adapter.ID(), fp, &reqPayload, &respPayload); err != nil {
+	recordedErr, err := s.cassette.Load(adapter.ID(), fp, &reqPayload, &respPayload)
+	if err != nil {
 		return nil, err // preserves ErrCassetteMiss
 	}
-	return &RawResponse{adapterID_: adapter.ID(), Payload: respPayload}, nil
+	raw := &RawResponse{adapterID_: adapter.ID(), Payload: respPayload}
+	if recordedErr != "" {
+		return raw, errors.New(recordedErr)
+	}
+	return raw, nil
 }

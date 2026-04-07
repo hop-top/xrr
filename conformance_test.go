@@ -44,7 +44,7 @@ func TestConformanceFixtures(t *testing.T) {
 			c := xrr.NewFileCassette(dir)
 			for _, interaction := range m.Interactions {
 				var reqPayload, respPayload map[string]any
-				err := c.Load(interaction.Adapter, interaction.Fingerprint, &reqPayload, &respPayload)
+				_, err := c.Load(interaction.Adapter, interaction.Fingerprint, &reqPayload, &respPayload)
 				assert.NoError(t, err,
 					"cassette miss: adapter=%s fp=%s", interaction.Adapter, interaction.Fingerprint)
 			}
